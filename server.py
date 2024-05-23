@@ -1,5 +1,5 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict
@@ -9,6 +9,7 @@ from rich.console import Console
 import redis
 import json
 import uuid
+import os
 
 # Define a message model
 class Message(BaseModel):
@@ -67,32 +68,38 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# Return minimal frontend
+# Serve frontend HTML
 @app.get("/", response_class=HTMLResponse)
 async def read_root() -> HTMLResponse:
-    return HTMLResponse(open("index.html", "r").read())
+    return FileResponse('static/chat.html')
+
+# Serve frontend JS
+@app.get("/static/chat.js", response_class=HTMLResponse)
+async def get_chat_js() -> HTMLResponse:
+    return FileResponse('static/chat.js')
 
 # Join the group chat via WebSocket
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()        # Accept the WebSocket connection
+    await websocket.accept()
     username = None
     try:
-        # Handle WebSocket connect
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
             if "username" in message:
+                # The user is joining the chat
                 username = f"{message['username']}#{uuid.uuid4().hex[:6]}"
                 await manager.connect(websocket, username)
                 await websocket.send_text(f"Connected as {username}")
                 await manager.broadcast(json.dumps({"content": f"{username} joined the chat", 
                                                     "timestamp": str(datetime.now()), 
                                                     "username": "system"}))
-                for message in chat_history:
-                    await websocket.send_text(json.dumps(message))
+                for msg in chat_history:
+                    await websocket.send_text(json.dumps(msg))
                 console.log(f"{username} joined the chat.")
             else:
+                # The user is sending a message
                 chat_message = Message(
                     message_id  =len(chat_history) + 1,
                     timestamp   =str(datetime.now()),
@@ -104,14 +111,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 await manager.broadcast(json.dumps(dict(chat_message)))
                 console.log(f"Message from {username}: {message['content']}")
 
-                # Broadcast user list to all users with user list
+                # Update user list that the new user has joined
                 user_list_message = json.dumps({"content": "User list update", 
                                                 "timestamp": str(datetime.now()), 
                                                 "username": "system",
                                                 "user_list": manager.get_user_list()})
                 await manager.broadcast(user_list_message)
 
-    # Handle WebSocket disconnect
+    # Handle WebSocket disconnect event
     except WebSocketDisconnect:
         if username:
             manager.disconnect(username)
@@ -120,7 +127,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                                 "username": "system"}))
             console.log(f"{username} left the chat.")
 
-            # Broadcast user list to all users
+            # Update the user list that one of the users has left
             user_list_message = json.dumps({"content": "User list update", 
                                             "timestamp": str(datetime.now()), 
                                             "username": "system",
@@ -130,7 +137,7 @@ async def websocket_endpoint(websocket: WebSocket):
 # Save chat history to Redis on server shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    yield           # Wait until the application is shut down
+    yield
     redis_client.set(CHAT_HISTORY_KEY, json.dumps(chat_history))
 
 app.router.lifespan_context = lifespan
